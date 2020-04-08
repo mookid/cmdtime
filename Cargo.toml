@@ -8,3 +8,9 @@ edition = "2018"
 
 [dependencies]
 winapi = { version = "0.3.8", features = ["profileapi"] }
+
+[dependencies.clap]
+version = "2.33.0"
+default-features = false
+features = ["suggestions"]
+

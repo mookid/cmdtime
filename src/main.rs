@@ -1,8 +1,8 @@
+#![allow(dead_code)]
 use winapi::shared::minwindef::FALSE;
 
-use std::thread;
-use std::time::Duration;
-use std::time::SystemTime;
+use clap::{App, AppSettings, Arg};
+
 use std::fmt::Display;
 
 struct Wrapper(i64);
@@ -71,33 +71,35 @@ fn get_perf_freq() -> f64 {
     w.0 as f64
 }
 
-const REPS: usize = 1000;
-const DURATION: Duration = Duration::from_millis(20);
-
 fn sq(x: f64) -> f64 {
     x * x
 }
 
+fn app() -> App<'static, 'static> {
+    App::new("time")
+        .setting(AppSettings::UnifiedHelpMessage)
+        .setting(AppSettings::TrailingVarArg)
+        .setting(AppSettings::DontCollapseArgsInUsage)
+        .setting(AppSettings::DontDelimitTrailingValues)
+        .version("0.1.0")
+        .author("Nathan Moreau <nathan.moreau@m4x.org>")
+        .arg(
+            Arg::with_name("command")
+                .takes_value(true)
+                .required(true)
+                .multiple(true)
+                .min_values(1)
+                .last(true),
+        )
+}
+
 fn main() {
-    let mut stat_perf_counter = Stat::new();
-    let mut stat_instant = Stat::new();
-
-    for _ in 0..REPS {
-        let start = get_perf_counter();
-        thread::sleep(DURATION);
-        let end = get_perf_counter();
-        stat_perf_counter.notify(end - start);
+    let matches = app().get_matches();
+    // dbg!(&matches);
+    if let Some(args) = matches.values_of_os("command") {
+        let args: Vec<_> = args
+            .map(|arg| arg.to_os_string().into_string().unwrap())
+            .collect();
+        dbg!(args.join(" "));
     }
-
-    stat_perf_counter.scale(1000.0 / get_perf_freq());
-
-    for _ in 0..REPS {
-        let start = SystemTime::now();
-        thread::sleep(DURATION);
-        let elapsed = start.elapsed();
-        stat_instant.notify(elapsed.expect("now").as_millis() as f64);
-    }
-
-    eprintln!("QueryPerformanceCounter: {:.6}", stat_perf_counter);
-    eprintln!("rust SystemTime: {:.6}", stat_instant);
 }
