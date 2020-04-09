@@ -1,5 +1,11 @@
 #![allow(dead_code)]
+use winapi::shared::minwindef::BOOL;
+use winapi::shared::minwindef::DWORD;
 use winapi::shared::minwindef::FALSE;
+use winapi::shared::ntdef::NULL;
+use winapi::um::winnt::HANDLE;
+use winapi::um::winnt::READ_CONTROL;
+use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
 
 use clap::{App, AppSettings, Arg};
 
@@ -40,6 +46,47 @@ impl Display for Stat {
         let sd = (self.m2 / self.n - sq(avg)).sqrt();
         write!(f, "avg={:.4} sd={:.4} sd/avg={:.4}", avg, sd, sd / avg)
     }
+}
+
+fn win32_get_process_handle(pid: DWORD) -> HANDLE {
+    use winapi::um::processthreadsapi::OpenProcess;
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid) };
+    if process == NULL {
+        panic!("OpenProcess")
+    }
+    process
+}
+
+fn win32_handle_result(result: BOOL, caller_name: &'static str) {
+    if result == FALSE {
+        panic!(
+            "wipapi {}: {}",
+            caller_name,
+            std::io::Error::last_os_error()
+        )
+    }
+}
+
+fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
+    use winapi::um::processthreadsapi::GetProcessTimes;
+
+    let mut creation_time = Wrapper(0);
+    let mut exit_time = Wrapper(0);
+    let mut kernel_time = Wrapper(0);
+    let mut user_time = Wrapper(0);
+    let ret = unsafe {
+        GetProcessTimes(
+            handle,
+            &mut creation_time as *mut _ as _,
+            &mut exit_time as *mut _ as _,
+            &mut kernel_time as *mut _ as _,
+            &mut user_time as *mut _ as _,
+        )
+    };
+    win32_handle_result(ret, "GetProcessTimes");
+    // w.0 as f64
+    (0.0, 0.0)
 }
 
 fn get_perf_counter() -> f64 {
@@ -93,13 +140,54 @@ fn app() -> App<'static, 'static> {
         )
 }
 
-fn main() {
+fn exec(args: &[String]) -> std::io::Result<u32> {
+    let child = std::process::Command::new(&args[0])
+        .args(&args[1..])
+        .spawn()?;
+    let pid = child.id();
+    child.wait_with_output().expect("wait_with_output");
+    Ok(pid)
+}
+
+fn format_duration(
+    f: &mut impl std::io::Write,
+    name: &'static str,
+    seconds: f64,
+) -> std::io::Result<()> {
+    let minutes = seconds.floor() as i64 / 60;
+    let seconds = seconds - 60.0 * minutes as f64;
+    write!(f, "{}\t{}m{:.3}s\n", name, minutes, seconds)?;
+    Ok(())
+}
+
+fn main() -> std::io::Result<()> {
     let matches = app().get_matches();
     // dbg!(&matches);
+    let freq = get_perf_freq();
+
     if let Some(args) = matches.values_of_os("command") {
+
+        let wall0 = get_perf_counter() as f64;
+        // let (u0, k0) = get_user_and_kernel_time();
+
         let args: Vec<_> = args
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
-        dbg!(args.join(" "));
+        let pid = exec(&args)?;
+        let handle = win32_get_process_handle(pid);
+
+        let wall1 = get_perf_counter();
+        let (u1, k1) = get_user_and_kernel_time(handle);
+
+        let wall = 1.0 / freq * (wall1 - wall0);
+        let user = 0.0;
+        let kernel = 0.0;
+
+        let stderr = &mut std::io::stderr();
+        eprintln!();
+        format_duration(stderr, "real", wall)?;
+        format_duration(stderr, "user", user)?;
+        format_duration(stderr, "sys", kernel)?;
     }
+    Ok(())
 }
