@@ -3,15 +3,14 @@ use winapi::shared::minwindef::BOOL;
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::minwindef::FALSE;
 use winapi::shared::ntdef::NULL;
-use winapi::um::winnt::HANDLE;
-use winapi::um::winnt::READ_CONTROL;
-use winapi::um::winnt::PROCESS_QUERY_INFORMATION;
+use winapi::um::winbase::*;
+use winapi::um::winnt::*;
 
 use clap::{App, AppSettings, Arg};
 
 use std::fmt::Display;
 
-struct Wrapper(i64);
+struct Wrapper64(i64);
 
 struct Stat {
     m1: f64,
@@ -68,13 +67,68 @@ fn win32_handle_result(result: BOOL, caller_name: &'static str) {
     }
 }
 
+struct ProcessDescr {
+    hprocess: HANDLE,
+    hthread: HANDLE,
+}
+
+impl Drop for ProcessDescr {
+    fn drop(&mut self) {
+        use winapi::um::handleapi::*;
+
+        unsafe {
+            CloseHandle(self.hthread);
+            CloseHandle(self.hprocess);
+        }
+    }
+}
+
+fn win32_todo(_cmd: &str) -> ProcessDescr {
+    todo!()
+}
+
+fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
+    // use winapi::um::processthreadsapi::CreateProcessW;
+    // use winapi::um::processthreadsapi::ResumeThread;
+    use winapi::um::processthreadsapi::*;
+
+    let (hthread, hprocess);
+    unsafe {
+        let mut application_name = "application".encode_utf16();
+        let mut command_line = cmd.encode_utf16();
+        let mut startup_info = std::mem::zeroed();
+        let mut process_info: PROCESS_INFORMATION = std::mem::zeroed();
+        let res = CreateProcessW(
+            /* lpApplicationName    */ &mut application_name as *mut _ as _,
+            /* lpCommandLine        */ &mut command_line as *mut _ as _,
+            /* lpProcessAttributes  */ NULL as *mut _,
+            /* lpThreadAttributes   */ NULL as *mut _,
+            /* bInheritHandles      */ FALSE,
+            /* dwCreationFlags      */ CREATE_SUSPENDED,
+            /* lpEnvironment        */ NULL as *mut _,
+            /* lpCurrentDirectory   */ NULL as *mut _,
+            /* lpStartupInfo        */ &mut startup_info as *mut _ as _,
+            /* lpProcessInformation */ &mut process_info as *mut _,
+        );
+        win32_handle_result(res, "CreateProcessW");
+
+        hthread = process_info.hThread;
+        hprocess = process_info.hProcess;
+        // ResumeThread(process_info.hThread);
+    };
+    ProcessDescr {
+        hthread,
+        hprocess,
+    }
+}
+
 fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
     use winapi::um::processthreadsapi::GetProcessTimes;
 
-    let mut creation_time = Wrapper(0);
-    let mut exit_time = Wrapper(0);
-    let mut kernel_time = Wrapper(0);
-    let mut user_time = Wrapper(0);
+    let mut creation_time = Wrapper64(0);
+    let mut exit_time = Wrapper64(0);
+    let mut kernel_time = Wrapper64(0);
+    let mut user_time = Wrapper64(0);
     let ret = unsafe {
         GetProcessTimes(
             handle,
@@ -92,7 +146,7 @@ fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
 fn get_perf_counter() -> f64 {
     use winapi::um::profileapi::QueryPerformanceCounter;
 
-    let mut w = Wrapper(0);
+    let mut w = Wrapper64(0);
     let ret = unsafe { QueryPerformanceCounter(&mut w as *mut _ as _) };
     if ret == FALSE {
         panic!(
@@ -104,10 +158,9 @@ fn get_perf_counter() -> f64 {
 }
 
 fn get_perf_freq() -> f64 {
-    struct Wrapper(i64);
     use winapi::um::profileapi::QueryPerformanceFrequency;
 
-    let mut w = Wrapper(0);
+    let mut w = Wrapper64(0);
     let ret = unsafe { QueryPerformanceFrequency(&mut w as *mut _ as _) };
     if ret == FALSE {
         panic!(
@@ -161,6 +214,9 @@ fn format_duration(
 }
 
 fn main() -> std::io::Result<()> {
+    let foo = std::env::args_os();
+    dbg!(foo);
+
     let matches = app().get_matches();
     // dbg!(&matches);
     let freq = get_perf_freq();
@@ -173,11 +229,13 @@ fn main() -> std::io::Result<()> {
         let args: Vec<_> = args
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
-        let pid = exec(&args)?;
-        let handle = win32_get_process_handle(pid);
+        // let pid = exec(&args)?;
+        let child = win32_create_suspended_process("git s");
+        // let handle = win32_get_process_handle(pid);
 
         let wall1 = get_perf_counter();
-        let (u1, k1) = get_user_and_kernel_time(handle);
+        // let (u1, k1) = get_user_and_kernel_time(handle);
+        let (u1, k1) = (0.0, 0.0);
 
         let wall = 1.0 / freq * (wall1 - wall0);
         let user = 0.0;

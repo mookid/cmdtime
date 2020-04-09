@@ -6,8 +6,9 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
-winapi = { version = "0.3.8", features = ["profileapi", "processthreadsapi"] }
+[dependencies.winapi]
+version = "0.3.8"
+features = ["profileapi", "processthreadsapi", "winbase", "handleapi"]
 
 [dependencies.clap]
 version = "2.33.0"
