@@ -15,23 +15,45 @@ use std::os::windows::ffi::OsStrExt;
 
 use std::ptr::null_mut;
 
-fn win32_handle_bool(result: BOOL, caller_name: &'static str) {
+fn win32_assert(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
         eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
         std::process::exit(2);
     }
 }
 
-fn win32_handle_null(result: PVOID, caller_name: &'static str) {
+fn win32_assert_not_null(result: PVOID, caller_name: &'static str) {
     if result == NULL {
         eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
         std::process::exit(2);
     }
 }
 
-struct ProcessDescr {
-    hprocess: HANDLE,
-    hthread: HANDLE,
+struct ProcessDescr(HANDLE);
+
+impl Drop for ProcessDescr {
+    fn drop(&mut self) {
+        use winapi::um::handleapi::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+struct ThreadDescr(HANDLE);
+
+impl ThreadDescr {
+    fn resume(&self) {
+        use winapi::um::processthreadsapi::ResumeThread;
+        unsafe {
+            ResumeThread(self.0);
+        }
+    }
+}
+
+impl Drop for ThreadDescr {
+    fn drop(&mut self) {
+        use winapi::um::handleapi::CloseHandle;
+        unsafe { CloseHandle(self.0) };
+    }
 }
 
 struct JobDescr {
@@ -42,35 +64,60 @@ struct JobDescr {
     hiocp: HANDLE,
 }
 
-impl Drop for ProcessDescr {
-    fn drop(&mut self) {
-        use winapi::um::handleapi::CloseHandle;
-        unsafe {
-            CloseHandle(self.hthread);
-            CloseHandle(self.hprocess);
-        }
-    }
-}
-
-impl ProcessDescr {
-    fn resume(&self) {
-        use winapi::um::processthreadsapi::ResumeThread;
-
-        unsafe {
-            ResumeThread(self.hthread);
-        }
-    }
+struct Times {
+    wall: f64,
+    user: f64,
+    kernel: f64,
 }
 
 unsafe fn _0<T>() -> T {
-    std::mem::zeroed::<T>() as T
+    std::mem::zeroed()
+}
+
+fn ptr<T>(value: &mut T) -> *mut T {
+    value as _
+}
+
+fn void_ptr<T>(value: &mut T) -> *mut winapi::ctypes::c_void {
+    ptr(value) as _
+}
+
+fn to_seconds(ft: &FILETIME) -> f64 {
+    ((ft.dwHighDateTime as LONGLONG) << 32 | ft.dwLowDateTime as LONGLONG) as f64 / 10_000_000.0
+}
+
+impl ProcessDescr {
+    fn get_process_times(&self) -> Times {
+        use winapi::um::processthreadsapi::GetProcessTimes;
+
+        let (mut kernel, mut user, mut start, mut end);
+        unsafe {
+            kernel = _0();
+            user = _0();
+            start = _0();
+            end = _0();
+            let ret = GetProcessTimes(
+                self.0,
+                ptr(&mut start),
+                ptr(&mut end),
+                ptr(&mut kernel),
+                ptr(&mut user),
+            );
+            win32_assert(ret, "GetProcessTimes");
+        };
+        Times {
+            user: to_seconds(&user),
+            kernel: to_seconds(&kernel),
+            wall: to_seconds(&end) - to_seconds(&start),
+        }
+    }
 }
 
 fn convert_utf16(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(once(0)).collect()
 }
 
-fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
+fn win32_create_suspended_process(cmd: &str) -> (ProcessDescr, ThreadDescr) {
     use winapi::um::processthreadsapi::*;
 
     let mut command_line = convert_utf16(cmd);
@@ -91,12 +138,12 @@ fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
             /* lpStartupInfo        */ &mut startup_info,
             /* lpProcessInformation */ &mut process_info,
         );
-        win32_handle_bool(res, "CreateProcessW");
+        win32_assert(res, "CreateProcessW");
 
         hthread = process_info.hThread;
         hprocess = process_info.hProcess;
     };
-    ProcessDescr { hthread, hprocess }
+    (ProcessDescr(hprocess), ThreadDescr(hthread))
 }
 
 fn win32_create_job() -> JobDescr {
@@ -109,9 +156,9 @@ fn win32_create_job() -> JobDescr {
     let (hjob, hiocp);
     unsafe {
         hjob = CreateJobObjectW(null_mut(), null_mut());
-        win32_handle_null(hjob, "CreateJobObjectW");
+        win32_assert_not_null(hjob, "CreateJobObjectW");
         hiocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1);
-        win32_handle_null(hiocp, "CreateIoCompletionPort");
+        win32_assert_not_null(hiocp, "CreateIoCompletionPort");
 
         let mut port: JOBOBJECT_ASSOCIATE_COMPLETION_PORT = _0();
         port.CompletionKey = hjob;
@@ -119,10 +166,10 @@ fn win32_create_job() -> JobDescr {
         let res = SetInformationJobObject(
             hjob,
             JobObjectAssociateCompletionPortInformation,
-            &mut port as *mut _ as _,
+            void_ptr(&mut port),
             std::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
         );
-        win32_handle_bool(res, "SetInformationJobObject");
+        win32_assert(res, "SetInformationJobObject");
     }
 
     JobDescr { hjob, hiocp }
@@ -131,8 +178,8 @@ fn win32_create_job() -> JobDescr {
 fn win32_attach_process_to_job(process: &ProcessDescr, job: &JobDescr) {
     use winapi::um::jobapi2::AssignProcessToJobObject;
     unsafe {
-        let res = AssignProcessToJobObject(job.hjob, process.hprocess);
-        win32_handle_bool(res, "AssignProcessToJobObject");
+        let res = AssignProcessToJobObject(job.hjob, process.0);
+        win32_assert(res, "AssignProcessToJobObject");
     }
 }
 
@@ -142,54 +189,20 @@ impl JobDescr {
 
         unsafe {
             let mut completion_code = _0();
-            let mut completion_key = _0::<HANDLE>();
+            let mut completion_key = _0();
             let mut overlapped = _0();
             while GetQueuedCompletionStatus(
                 self.hiocp,
-                &mut completion_code as *mut _ as _,
-                &mut completion_key as *mut _ as _,
-                &mut overlapped as *mut _ as _,
+                ptr(&mut completion_code),
+                ptr(&mut completion_key),
+                ptr(&mut overlapped),
                 INFINITE,
             ) == TRUE
-                && !(completion_key == self.hjob
+                && !(completion_key as HANDLE == self.hjob
                     && completion_code == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
             {}
         }
     }
-}
-
-struct Times {
-    wall: f64,
-    user: f64,
-    kernel: f64,
-}
-
-fn to_seconds(ft: &FILETIME) -> f64 {
-    ((ft.dwHighDateTime as LONGLONG) << 32 | ft.dwLowDateTime as LONGLONG) as f64 / 10_000_000.0
-}
-
-fn get_process_times(hprocess: HANDLE) -> Times {
-    use winapi::um::processthreadsapi::GetProcessTimes;
-
-    let (kernel, user, wall);
-    unsafe {
-        let mut kt = _0();
-        let mut ut = _0();
-        let mut start = _0();
-        let mut end = _0();
-        let ret = GetProcessTimes(
-            hprocess,
-            &mut start as *mut _,
-            &mut end as *mut _,
-            &mut kt as *mut _,
-            &mut ut as *mut _,
-        );
-        win32_handle_bool(ret, "GetProcessTimes");
-        user = to_seconds(&ut);
-        kernel = to_seconds(&kt);
-        wall = to_seconds(&end) - to_seconds(&start);
-    };
-    Times { user, wall, kernel }
 }
 
 fn app() -> App<'static, 'static> {
@@ -226,15 +239,15 @@ fn main() {
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
         let args = args.join(" ");
-        let child = win32_create_suspended_process(&args);
-        win32_attach_process_to_job(&child, &job);
+        let (process, thread) = win32_create_suspended_process(&args);
+        win32_attach_process_to_job(&process, &job);
 
-        child.resume();
+        thread.resume();
+        drop(thread);
         job.wait_for_job_completion();
 
-        let Times { wall, user, kernel } = get_process_times(child.hprocess);
-
-        drop(child);
+        let Times { wall, user, kernel } = process.get_process_times();
+        drop(process);
 
         print_duration("real", wall);
         print_duration("user", user);
