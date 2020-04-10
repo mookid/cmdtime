@@ -1,68 +1,17 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
 use winapi::shared::minwindef::BOOL;
-use winapi::shared::minwindef::DWORD;
 use winapi::shared::minwindef::FALSE;
-use winapi::shared::ntdef::NULL;
 use winapi::um::winbase::*;
 use winapi::um::winnt::*;
 
 use clap::{App, AppSettings, Arg};
 
 use std::ffi::OsStr;
-use std::fmt::Display;
 use std::iter::once;
 use std::os::windows::ffi::OsStrExt;
 
 use std::ptr::null_mut;
 
 struct Wrapper64(i64);
-
-struct Stat {
-    m1: f64,
-    m2: f64,
-    n: f64,
-}
-
-impl Stat {
-    fn new() -> Self {
-        Stat {
-            m1: 0f64,
-            m2: 0f64,
-            n: 0f64,
-        }
-    }
-
-    fn notify(&mut self, val: f64) {
-        self.m1 += val;
-        self.m2 += sq(val);
-        self.n += 1.0;
-    }
-
-    fn scale(&mut self, val: f64) {
-        self.m1 *= val;
-        self.m2 *= sq(val);
-    }
-}
-
-impl Display for Stat {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let avg = self.m1 / self.n;
-        let sd = (self.m2 / self.n - sq(avg)).sqrt();
-        write!(f, "avg={:.4} sd={:.4} sd/avg={:.4}", avg, sd, sd / avg)
-    }
-}
-
-fn win32_get_process_handle(pid: DWORD) -> HANDLE {
-    use winapi::um::processthreadsapi::OpenProcess;
-
-    let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid) };
-    if process == NULL {
-        eprintln!("OpenProcess: {}", std::io::Error::last_os_error());
-        std::process::exit(2);
-    }
-    process
-}
 
 fn win32_handle_result(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
@@ -108,7 +57,7 @@ fn convert_utf16(s: &str) -> Vec<u16> {
 fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
     use winapi::um::processthreadsapi::*;
 
-    let mut command_line = convert_utf16(dbg!(cmd));
+    let mut command_line = convert_utf16(cmd);
 
     let (hthread, hprocess);
     unsafe {
@@ -184,10 +133,6 @@ fn get_perf_freq() -> f64 {
     w.0 as f64
 }
 
-fn sq(x: f64) -> f64 {
-    x * x
-}
-
 fn app() -> App<'static, 'static> {
     App::new("time")
         .setting(AppSettings::UnifiedHelpMessage)
@@ -206,32 +151,17 @@ fn app() -> App<'static, 'static> {
         )
 }
 
-fn exec(args: &[String]) -> std::io::Result<u32> {
-    let child = std::process::Command::new(&args[0])
-        .args(&args[1..])
-        .spawn()?;
-    let pid = child.id();
-    child.wait_with_output().expect("wait_with_output");
-    Ok(pid)
-}
-
-fn format_duration(
-    f: &mut impl std::io::Write,
+fn print_duration(
     name: &'static str,
     seconds: f64,
-) -> std::io::Result<()> {
+) {
     let minutes = seconds.floor() as i64 / 60;
     let seconds = seconds - 60.0 * minutes as f64;
-    write!(f, "{}\t{}m{:.3}s\n", name, minutes, seconds)?;
-    Ok(())
+    eprintln!("{}\t{}m{:.3}s\n", name, minutes, seconds);
 }
 
-fn main() -> std::io::Result<()> {
-    let foo = std::env::args_os();
-    dbg!(foo);
-
+fn main() {
     let matches = app().get_matches();
-    // dbg!(&matches);
     let freq = get_perf_freq();
 
     if let Some(args) = matches.values_of_os("command") {
@@ -239,28 +169,21 @@ fn main() -> std::io::Result<()> {
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
         let args = args.join(" ");
-        // let pid = exec(&args)?;
         let child = win32_create_suspended_process(&args);
-        dbg!(&child);
 
         let wall0 = get_perf_counter() as f64;
 
         child.resume();
 
         let wall1 = get_perf_counter();
-        let (u1, k1) = dbg!(get_user_and_kernel_time(child.hprocess));
-        
+        let (user, kernel) = get_user_and_kernel_time(child.hprocess);
+
         drop(child);
 
         let wall = 1.0 / freq * (wall1 - wall0);
-        let user = 0.0;
-        let kernel = 0.0;
 
-        let stderr = &mut std::io::stderr();
-        eprintln!();
-        format_duration(stderr, "real", wall)?;
-        format_duration(stderr, "user", user)?;
-        format_duration(stderr, "sys", kernel)?;
+        print_duration("real", wall);
+        print_duration("user", user);
+        print_duration("sys", kernel);
     }
-    Ok(())
 }
