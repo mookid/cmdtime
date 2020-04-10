@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_variables)]
 use winapi::shared::minwindef::BOOL;
 use winapi::shared::minwindef::DWORD;
 use winapi::shared::minwindef::FALSE;
@@ -8,7 +9,12 @@ use winapi::um::winnt::*;
 
 use clap::{App, AppSettings, Arg};
 
+use std::ffi::OsStr;
 use std::fmt::Display;
+use std::iter::once;
+use std::os::windows::ffi::OsStrExt;
+
+use std::ptr::null_mut;
 
 struct Wrapper64(i64);
 
@@ -52,21 +58,20 @@ fn win32_get_process_handle(pid: DWORD) -> HANDLE {
 
     let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid) };
     if process == NULL {
-        panic!("OpenProcess")
+        eprintln!("OpenProcess: {}", std::io::Error::last_os_error());
+        std::process::exit(2);
     }
     process
 }
 
 fn win32_handle_result(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
-        panic!(
-            "wipapi {}: {}",
-            caller_name,
-            std::io::Error::last_os_error()
-        )
+        eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
+        std::process::exit(2);
     }
 }
 
+#[derive(Debug)]
 struct ProcessDescr {
     hprocess: HANDLE,
     hthread: HANDLE,
@@ -75,7 +80,6 @@ struct ProcessDescr {
 impl Drop for ProcessDescr {
     fn drop(&mut self) {
         use winapi::um::handleapi::*;
-
         unsafe {
             CloseHandle(self.hthread);
             CloseHandle(self.hprocess);
@@ -83,43 +87,41 @@ impl Drop for ProcessDescr {
     }
 }
 
-fn win32_todo(_cmd: &str) -> ProcessDescr {
-    todo!()
+unsafe fn _0<T>() -> T {
+    std::mem::zeroed::<T>() as T
+}
+
+fn convert_utf16(s: &str) -> Vec<u16> {
+    OsStr::new(s).encode_wide().chain(once(0)).collect()
 }
 
 fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
-    // use winapi::um::processthreadsapi::CreateProcessW;
-    // use winapi::um::processthreadsapi::ResumeThread;
     use winapi::um::processthreadsapi::*;
+
+    let mut command_line = convert_utf16(dbg!(cmd));
 
     let (hthread, hprocess);
     unsafe {
-        let mut application_name = "application".encode_utf16();
-        let mut command_line = cmd.encode_utf16();
-        let mut startup_info = std::mem::zeroed();
-        let mut process_info: PROCESS_INFORMATION = std::mem::zeroed();
+        let mut startup_info = _0(); // TODO redirect stdin/stdout/stderr
+        let mut process_info = _0();
         let res = CreateProcessW(
-            /* lpApplicationName    */ &mut application_name as *mut _ as _,
-            /* lpCommandLine        */ &mut command_line as *mut _ as _,
-            /* lpProcessAttributes  */ NULL as *mut _,
-            /* lpThreadAttributes   */ NULL as *mut _,
+            /* lpApplicationName    */ null_mut(),
+            /* lpCommandLine        */ command_line.as_mut_ptr(),
+            /* lpProcessAttributes  */ null_mut(),
+            /* lpThreadAttributes   */ null_mut(),
             /* bInheritHandles      */ FALSE,
             /* dwCreationFlags      */ CREATE_SUSPENDED,
-            /* lpEnvironment        */ NULL as *mut _,
-            /* lpCurrentDirectory   */ NULL as *mut _,
-            /* lpStartupInfo        */ &mut startup_info as *mut _ as _,
-            /* lpProcessInformation */ &mut process_info as *mut _,
+            /* lpEnvironment        */ null_mut(),
+            /* lpCurrentDirectory   */ null_mut(),
+            /* lpStartupInfo        */ &mut startup_info,
+            /* lpProcessInformation */ &mut process_info,
         );
         win32_handle_result(res, "CreateProcessW");
 
         hthread = process_info.hThread;
         hprocess = process_info.hProcess;
-        // ResumeThread(process_info.hThread);
     };
-    ProcessDescr {
-        hthread,
-        hprocess,
-    }
+    ProcessDescr { hthread, hprocess }
 }
 
 fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
@@ -149,10 +151,11 @@ fn get_perf_counter() -> f64 {
     let mut w = Wrapper64(0);
     let ret = unsafe { QueryPerformanceCounter(&mut w as *mut _ as _) };
     if ret == FALSE {
-        panic!(
+        eprintln!(
             "wipapi QueryPerformanceCounter: {}",
             std::io::Error::last_os_error()
-        )
+        );
+        std::process::exit(2);
     }
     w.0 as f64
 }
@@ -163,7 +166,7 @@ fn get_perf_freq() -> f64 {
     let mut w = Wrapper64(0);
     let ret = unsafe { QueryPerformanceFrequency(&mut w as *mut _ as _) };
     if ret == FALSE {
-        panic!(
+        eprintln!(
             "wipapi QueryPerformanceFrequency: {}",
             std::io::Error::last_os_error()
         )
@@ -222,16 +225,16 @@ fn main() -> std::io::Result<()> {
     let freq = get_perf_freq();
 
     if let Some(args) = matches.values_of_os("command") {
-
-        let wall0 = get_perf_counter() as f64;
-        // let (u0, k0) = get_user_and_kernel_time();
-
         let args: Vec<_> = args
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
+        let args = args.join(" ");
         // let pid = exec(&args)?;
-        let child = win32_create_suspended_process("git s");
-        // let handle = win32_get_process_handle(pid);
+        let child = win32_create_suspended_process(&args);
+        dbg!(&child);
+
+        let wall0 = get_perf_counter() as f64;
+        // let (u0, k0) = get_user_and_kernel_time();
 
         let wall1 = get_perf_counter();
         // let (u1, k1) = get_user_and_kernel_time(handle);
