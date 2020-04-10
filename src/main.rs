@@ -1,7 +1,10 @@
 use winapi::shared::minwindef::BOOL;
 use winapi::shared::minwindef::FALSE;
+use winapi::shared::minwindef::TRUE;
+use winapi::shared::ntdef::*;
 use winapi::um::winbase::*;
-use winapi::um::winnt::*;
+use winapi::um::winnt::JOBOBJECT_ASSOCIATE_COMPLETION_PORT;
+use winapi::um::winnt::JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO;
 
 use clap::{App, AppSettings, Arg};
 
@@ -20,15 +23,31 @@ fn win32_handle_result(result: BOOL, caller_name: &'static str) {
     }
 }
 
+fn win32_handle_null(result: PVOID, caller_name: &'static str) {
+    if result == NULL {
+        eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
+        std::process::exit(2);
+    }
+}
+
 #[derive(Debug)]
 struct ProcessDescr {
     hprocess: HANDLE,
     hthread: HANDLE,
 }
 
+#[derive(Debug)]
+struct JobDescr {
+    // handle to the job containing the launched process
+    hjob: HANDLE,
+
+    // IO Completion port that is notified on process termination
+    hiocp: HANDLE,
+}
+
 impl Drop for ProcessDescr {
     fn drop(&mut self) {
-        use winapi::um::handleapi::*;
+        use winapi::um::handleapi::CloseHandle;
         unsafe {
             CloseHandle(self.hthread);
             CloseHandle(self.hprocess);
@@ -81,6 +100,65 @@ fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
         hprocess = process_info.hProcess;
     };
     ProcessDescr { hthread, hprocess }
+}
+
+fn win32_create_job() -> JobDescr {
+    use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+    use winapi::um::ioapiset::CreateIoCompletionPort;
+    use winapi::um::jobapi2::CreateJobObjectW;
+    use winapi::um::jobapi2::SetInformationJobObject;
+    use winapi::um::winnt::JobObjectAssociateCompletionPortInformation;
+
+    let (hjob, hiocp);
+    unsafe {
+        hjob = CreateJobObjectW(null_mut(), null_mut());
+        win32_handle_null(hjob, "CreateJobObjectW");
+        hiocp = CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1);
+        win32_handle_null(hiocp, "CreateIoCompletionPort");
+
+        let mut port: JOBOBJECT_ASSOCIATE_COMPLETION_PORT = _0();
+        port.CompletionKey = hjob;
+        port.CompletionPort = hiocp;
+        let res = SetInformationJobObject(
+            hjob,
+            JobObjectAssociateCompletionPortInformation,
+            &mut port as *mut _ as _,
+            std::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+        );
+        win32_handle_result(res, "SetInformationJobObject");
+    }
+
+    JobDescr { hjob, hiocp }
+}
+
+fn win32_attach_process_to_job(process: &ProcessDescr, job: &JobDescr) {
+    use winapi::um::jobapi2::AssignProcessToJobObject;
+    unsafe {
+        let res = AssignProcessToJobObject(job.hjob, process.hprocess);
+        win32_handle_result(res, "AssignProcessToJobObject");
+    }
+}
+
+impl JobDescr {
+    fn wait_for_job_completion(self) {
+        use winapi::um::ioapiset::GetQueuedCompletionStatus;
+
+        unsafe {
+            let mut completion_code = _0();
+            let mut completion_key = _0::<HANDLE>();
+            let mut overlapped = _0();
+            while GetQueuedCompletionStatus(
+                self.hiocp,
+                &mut completion_code as *mut _ as _,
+                &mut completion_key as *mut _ as _,
+                &mut overlapped as *mut _ as _,
+                INFINITE,
+            ) == TRUE
+                && !(completion_key == self.hjob
+                    && completion_code == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO)
+            {}
+        }
+    }
 }
 
 fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
@@ -151,13 +229,10 @@ fn app() -> App<'static, 'static> {
         )
 }
 
-fn print_duration(
-    name: &'static str,
-    seconds: f64,
-) {
+fn print_duration(name: &'static str, seconds: f64) {
     let minutes = seconds.floor() as i64 / 60;
     let seconds = seconds - 60.0 * minutes as f64;
-    eprintln!("{}\t{}m{:.3}s\n", name, minutes, seconds);
+    eprintln!("{}\t{}m{:.3}s", name, minutes, seconds);
 }
 
 fn main() {
@@ -165,15 +240,19 @@ fn main() {
     let freq = get_perf_freq();
 
     if let Some(args) = matches.values_of_os("command") {
+        let job = win32_create_job();
+
         let args: Vec<_> = args
             .map(|arg| arg.to_os_string().into_string().unwrap())
             .collect();
         let args = args.join(" ");
         let child = win32_create_suspended_process(&args);
+        win32_attach_process_to_job(&child, &job);
 
         let wall0 = get_perf_counter() as f64;
 
         child.resume();
+        job.wait_for_job_completion();
 
         let wall1 = get_perf_counter();
         let (user, kernel) = get_user_and_kernel_time(child.hprocess);
