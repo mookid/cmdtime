@@ -1,0 +1,3 @@
+A port of unix time command to windows
+
+usage: cmdtime -- program args...

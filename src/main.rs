@@ -206,12 +206,13 @@ impl JobDescr {
 }
 
 fn app() -> App<'static, 'static> {
-    App::new("time")
+    App::new("cmdtime")
         .setting(AppSettings::UnifiedHelpMessage)
         .setting(AppSettings::TrailingVarArg)
         .setting(AppSettings::DontCollapseArgsInUsage)
         .setting(AppSettings::DontDelimitTrailingValues)
         .version("0.1.0")
+        .usage("cmdtime -- command [arg...]")
         .author("Nathan Moreau <nathan.moreau@m4x.org>")
         .arg(
             Arg::with_name("command")
@@ -219,6 +220,7 @@ fn app() -> App<'static, 'static> {
                 .required(true)
                 .multiple(true)
                 .min_values(1)
+                .help("The command to launch")
                 .last(true),
         )
 }
