@@ -1,5 +1,6 @@
 use winapi::shared::minwindef::BOOL;
 use winapi::shared::minwindef::FALSE;
+use winapi::shared::minwindef::FILETIME;
 use winapi::shared::minwindef::TRUE;
 use winapi::shared::ntdef::*;
 use winapi::um::winbase::*;
@@ -14,9 +15,7 @@ use std::os::windows::ffi::OsStrExt;
 
 use std::ptr::null_mut;
 
-struct Wrapper64(i64);
-
-fn win32_handle_result(result: BOOL, caller_name: &'static str) {
+fn win32_handle_bool(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
         eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
         std::process::exit(2);
@@ -92,7 +91,7 @@ fn win32_create_suspended_process(cmd: &str) -> ProcessDescr {
             /* lpStartupInfo        */ &mut startup_info,
             /* lpProcessInformation */ &mut process_info,
         );
-        win32_handle_result(res, "CreateProcessW");
+        win32_handle_bool(res, "CreateProcessW");
 
         hthread = process_info.hThread;
         hprocess = process_info.hProcess;
@@ -123,7 +122,7 @@ fn win32_create_job() -> JobDescr {
             &mut port as *mut _ as _,
             std::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
         );
-        win32_handle_result(res, "SetInformationJobObject");
+        win32_handle_bool(res, "SetInformationJobObject");
     }
 
     JobDescr { hjob, hiocp }
@@ -133,7 +132,7 @@ fn win32_attach_process_to_job(process: &ProcessDescr, job: &JobDescr) {
     use winapi::um::jobapi2::AssignProcessToJobObject;
     unsafe {
         let res = AssignProcessToJobObject(job.hjob, process.hprocess);
-        win32_handle_result(res, "AssignProcessToJobObject");
+        win32_handle_bool(res, "AssignProcessToJobObject");
     }
 }
 
@@ -159,54 +158,38 @@ impl JobDescr {
     }
 }
 
-fn get_user_and_kernel_time(handle: HANDLE) -> (f64, f64) {
+struct Times {
+    wall: f64,
+    user: f64,
+    kernel: f64,
+}
+
+fn to_seconds(ft: &FILETIME) -> f64 {
+    ((ft.dwHighDateTime as LONGLONG) << 32 | ft.dwLowDateTime as LONGLONG) as f64 / 10_000_000.0
+}
+
+fn get_process_times(hprocess: HANDLE) -> Times {
     use winapi::um::processthreadsapi::GetProcessTimes;
 
-    let mut creation_time = Wrapper64(0);
-    let mut exit_time = Wrapper64(0);
-    let mut kernel_time = Wrapper64(0);
-    let mut user_time = Wrapper64(0);
-    let ret = unsafe {
-        GetProcessTimes(
-            handle,
-            &mut creation_time as *mut _ as _,
-            &mut exit_time as *mut _ as _,
-            &mut kernel_time as *mut _ as _,
-            &mut user_time as *mut _ as _,
-        )
-    };
-    win32_handle_result(ret, "GetProcessTimes");
-    // w.0 as f64
-    (0.0, 0.0)
-}
-
-fn get_perf_counter() -> f64 {
-    use winapi::um::profileapi::QueryPerformanceCounter;
-
-    let mut w = Wrapper64(0);
-    let ret = unsafe { QueryPerformanceCounter(&mut w as *mut _ as _) };
-    if ret == FALSE {
-        eprintln!(
-            "wipapi QueryPerformanceCounter: {}",
-            std::io::Error::last_os_error()
+    let (kernel, user, wall);
+    unsafe {
+        let mut kt = _0();
+        let mut ut = _0();
+        let mut start = _0();
+        let mut end = _0();
+        let ret = GetProcessTimes(
+            hprocess,
+            &mut start as *mut _,
+            &mut end as *mut _,
+            &mut kt as *mut _,
+            &mut ut as *mut _,
         );
-        std::process::exit(2);
-    }
-    w.0 as f64
-}
-
-fn get_perf_freq() -> f64 {
-    use winapi::um::profileapi::QueryPerformanceFrequency;
-
-    let mut w = Wrapper64(0);
-    let ret = unsafe { QueryPerformanceFrequency(&mut w as *mut _ as _) };
-    if ret == FALSE {
-        eprintln!(
-            "wipapi QueryPerformanceFrequency: {}",
-            std::io::Error::last_os_error()
-        )
-    }
-    w.0 as f64
+        win32_handle_bool(ret, "GetProcessTimes");
+        user = to_seconds(&ut);
+        kernel = to_seconds(&kt);
+        wall = to_seconds(&end) - to_seconds(&start);
+    };
+    Times { user, wall, kernel }
 }
 
 fn app() -> App<'static, 'static> {
@@ -235,7 +218,6 @@ fn print_duration(name: &'static str, seconds: f64) {
 
 fn main() {
     let matches = app().get_matches();
-    let freq = get_perf_freq();
 
     if let Some(args) = matches.values_of_os("command") {
         let job = win32_create_job();
@@ -247,17 +229,12 @@ fn main() {
         let child = win32_create_suspended_process(&args);
         win32_attach_process_to_job(&child, &job);
 
-        let wall0 = get_perf_counter() as f64;
-
         child.resume();
         job.wait_for_job_completion();
 
-        let wall1 = get_perf_counter();
-        let (user, kernel) = get_user_and_kernel_time(child.hprocess);
+        let Times { wall, user, kernel } = get_process_times(child.hprocess);
 
         drop(child);
-
-        let wall = 1.0 / freq * (wall1 - wall0);
 
         print_duration("real", wall);
         print_duration("user", user);
