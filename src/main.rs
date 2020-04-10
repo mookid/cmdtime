@@ -87,6 +87,16 @@ impl Drop for ProcessDescr {
     }
 }
 
+impl ProcessDescr {
+    fn resume(&self) {
+        use winapi::um::processthreadsapi::ResumeThread;
+
+        unsafe {
+            ResumeThread(self.hthread);
+        }
+    }
+}
+
 unsafe fn _0<T>() -> T {
     std::mem::zeroed::<T>() as T
 }
@@ -234,11 +244,13 @@ fn main() -> std::io::Result<()> {
         dbg!(&child);
 
         let wall0 = get_perf_counter() as f64;
-        // let (u0, k0) = get_user_and_kernel_time();
+
+        child.resume();
 
         let wall1 = get_perf_counter();
-        // let (u1, k1) = get_user_and_kernel_time(handle);
-        let (u1, k1) = (0.0, 0.0);
+        let (u1, k1) = dbg!(get_user_and_kernel_time(child.hprocess));
+        
+        drop(child);
 
         let wall = 1.0 / freq * (wall1 - wall0);
         let user = 0.0;
