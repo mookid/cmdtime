@@ -30,13 +30,11 @@ fn win32_handle_null(result: PVOID, caller_name: &'static str) {
     }
 }
 
-#[derive(Debug)]
 struct ProcessDescr {
     hprocess: HANDLE,
     hthread: HANDLE,
 }
 
-#[derive(Debug)]
 struct JobDescr {
     // handle to the job containing the launched process
     hjob: HANDLE,
