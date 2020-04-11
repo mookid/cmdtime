@@ -15,6 +15,10 @@ use std::os::windows::ffi::OsStrExt;
 
 use std::ptr::null_mut;
 
+const OPT_COMMAND: &str = "command";
+const OPT_OUTPUTFILE: &str = "output";
+const FLAG_APPEND: &str = "append";
+
 fn win32_assert(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
         eprintln!("{}: {}", caller_name, std::io::Error::last_os_error());
@@ -215,7 +219,7 @@ fn app() -> App<'static, 'static> {
         .usage("cmdtime -- command [arg...]")
         .author("Nathan Moreau <nathan.moreau@m4x.org>")
         .arg(
-            Arg::with_name("command")
+            Arg::with_name(OPT_COMMAND)
                 .takes_value(true)
                 .required(true)
                 .multiple(true)
@@ -223,18 +227,51 @@ fn app() -> App<'static, 'static> {
                 .help("The command to launch")
                 .last(true),
         )
+        .arg(
+            Arg::with_name(OPT_OUTPUTFILE)
+                .takes_value(true)
+                .short("-o")
+                .help("The file to write output to, default to stderr"),
+        )
+        .arg(
+            Arg::with_name(FLAG_APPEND)
+                .short("-a")
+                .help("If true, append rather than truncate the outputfile"),
+        )
 }
 
-fn print_duration(name: &'static str, seconds: f64) {
+fn print_duration(
+    f: &mut impl std::io::Write,
+    name: &'static str,
+    seconds: f64,
+) -> std::io::Result<()> {
     let minutes = seconds.floor() as i64 / 60;
     let seconds = seconds - 60.0 * minutes as f64;
-    eprintln!("{}\t{}m{:.3}s", name, minutes, seconds);
+    write!(f, "{}\t{}m{:.3}s\n", name, minutes, seconds)
 }
 
-fn main() {
+fn open_file(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .truncate(!append)
+        .append(append)
+        .create(true)
+        .write(true)
+        .open(path)
+}
+
+fn main() -> std::io::Result<()> {
     let matches = app().get_matches();
 
-    if let Some(args) = matches.values_of_os("command") {
+    let mut w: Box<dyn std::io::Write> = if let Some(ofile) = matches.value_of_os(OPT_OUTPUTFILE) {
+        Box::new(open_file(
+            std::path::Path::new(ofile),
+            matches.is_present(FLAG_APPEND),
+        )?)
+    } else {
+        Box::new(std::io::stderr())
+    };
+
+    if let Some(args) = matches.values_of_os(OPT_COMMAND) {
         let job = win32_create_job();
 
         let args: Vec<_> = args
@@ -251,8 +288,9 @@ fn main() {
         let Times { wall, user, kernel } = process.get_process_times();
         drop(process);
 
-        print_duration("real", wall);
-        print_duration("user", user);
-        print_duration("sys", kernel);
+        print_duration(&mut w, "real", wall)?;
+        print_duration(&mut w, "user", user)?;
+        print_duration(&mut w, "sys", kernel)?;
     }
+    Ok(())
 }
