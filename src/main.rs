@@ -1,6 +1,5 @@
 use winapi::shared::minwindef::BOOL;
 use winapi::shared::minwindef::FALSE;
-use winapi::shared::minwindef::FILETIME;
 use winapi::shared::minwindef::TRUE;
 use winapi::shared::ntdef::*;
 use winapi::um::winbase::*;
@@ -18,6 +17,8 @@ use std::ptr::null_mut;
 const OPT_COMMAND: &str = "command";
 const OPT_OUTPUTFILE: &str = "output";
 const FLAG_APPEND: &str = "append";
+
+struct Wrapper<T>(T);
 
 fn win32_assert(result: BOOL, caller_name: &'static str) {
     if result == FALSE {
@@ -69,7 +70,6 @@ struct JobDescr {
 }
 
 struct Times {
-    wall: f64,
     user: f64,
     kernel: f64,
 }
@@ -82,39 +82,37 @@ fn ptr<T>(value: &mut T) -> *mut T {
     value as _
 }
 
-fn void_ptr<T>(value: &mut T) -> *mut winapi::ctypes::c_void {
+fn void_ptr<T, R>(value: &mut T) -> *mut R {
     ptr(value) as _
 }
 
-fn to_seconds(ft: &FILETIME) -> f64 {
-    ((ft.dwHighDateTime as LONGLONG) << 32 | ft.dwLowDateTime as LONGLONG) as f64 / 10_000_000.0
+fn get_perf_counter() -> f64 {
+    use winapi::um::profileapi::QueryPerformanceCounter;
+
+    let mut w = Wrapper(0.0);
+    let ret = unsafe { QueryPerformanceCounter(void_ptr(&mut w)) };
+    if ret == FALSE {
+        eprintln!(
+            "wipapi QueryPerformanceCounter: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(2);
+    }
+    w.0
 }
 
-impl ProcessDescr {
-    fn get_process_times(&self) -> Times {
-        use winapi::um::processthreadsapi::GetProcessTimes;
+fn get_perf_freq() -> f64 {
+    use winapi::um::profileapi::QueryPerformanceFrequency;
 
-        let (mut kernel, mut user, mut start, mut end);
-        unsafe {
-            kernel = _0();
-            user = _0();
-            start = _0();
-            end = _0();
-            let ret = GetProcessTimes(
-                self.0,
-                ptr(&mut start),
-                ptr(&mut end),
-                ptr(&mut kernel),
-                ptr(&mut user),
-            );
-            win32_assert(ret, "GetProcessTimes");
-        };
-        Times {
-            user: to_seconds(&user),
-            kernel: to_seconds(&kernel),
-            wall: to_seconds(&end) - to_seconds(&start),
-        }
+    let mut w = Wrapper(0.0);
+    let ret = unsafe { QueryPerformanceFrequency(void_ptr(&mut w)) };
+    if ret == FALSE {
+        eprintln!(
+            "wipapi QueryPerformanceFrequency: {}",
+            std::io::Error::last_os_error()
+        )
     }
+    w.0
 }
 
 fn convert_utf16(s: &str) -> Vec<u16> {
@@ -188,7 +186,7 @@ fn win32_attach_process_to_job(process: &ProcessDescr, job: &JobDescr) {
 }
 
 impl JobDescr {
-    fn wait_for_job_completion(self) {
+    fn wait_for_job_completion(&self) {
         use winapi::um::ioapiset::GetQueuedCompletionStatus;
 
         unsafe {
@@ -207,6 +205,35 @@ impl JobDescr {
             {}
         }
     }
+
+    fn get_job_times(&self) -> Times {
+        use winapi::um::jobapi2::QueryInformationJobObject;
+        use winapi::um::winnt::JOBOBJECT_BASIC_ACCOUNTING_INFORMATION;
+        use winapi::um::winnt::JobObjectBasicAccountingInformation;
+        use winapi::um::winnt::LARGE_INTEGER;
+
+        fn to_seconds(value: LARGE_INTEGER) -> f64 {
+            (unsafe { *value.QuadPart() }) as f64 / 10_000_000.0
+        }
+
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION;
+        unsafe {
+            info = _0();
+            let ret = QueryInformationJobObject(
+                self.hjob,
+                JobObjectBasicAccountingInformation,
+                void_ptr(&mut info),
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                null_mut(),
+            );
+            win32_assert(ret, "QueryInformationJobObject");
+        };
+        Times {
+            user: to_seconds(info.TotalUserTime),
+            kernel: to_seconds(info.TotalKernelTime),
+        }
+    }
+
 }
 
 fn app() -> App<'static, 'static> {
@@ -261,6 +288,7 @@ fn open_file(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::F
 
 fn main() -> std::io::Result<()> {
     let matches = app().get_matches();
+    let freq = get_perf_freq();
 
     let mut w: Box<dyn std::io::Write> = if let Some(ofile) = matches.value_of_os(OPT_OUTPUTFILE) {
         Box::new(open_file(
@@ -280,17 +308,21 @@ fn main() -> std::io::Result<()> {
         let args = args.join(" ");
         let (process, thread) = win32_create_suspended_process(&args);
         win32_attach_process_to_job(&process, &job);
+        drop(process);
 
+        let wall0 = get_perf_counter();
         thread.resume();
         drop(thread);
         job.wait_for_job_completion();
+        let wall1 = get_perf_counter();
 
-        let Times { wall, user, kernel } = process.get_process_times();
-        drop(process);
+        let wall = (wall1 - wall0) / freq;
+
+        let job_times = job.get_job_times();
 
         print_duration(&mut w, "real", wall)?;
-        print_duration(&mut w, "user", user)?;
-        print_duration(&mut w, "sys", kernel)?;
+        print_duration(&mut w, "user", job_times.user)?;
+        print_duration(&mut w, "sys", job_times.kernel)?;
     }
     Ok(())
 }
