@@ -274,7 +274,7 @@ fn print_duration(
 ) -> std::io::Result<()> {
     let minutes = seconds.floor() as i64 / 60;
     let seconds = seconds - 60.0 * minutes as f64;
-    write!(f, "{}\t{}m{:.3}s\n", name, minutes, seconds)
+    writeln!(f, "{}\t{}m{:.3}s", name, minutes, seconds)
 }
 
 fn open_file(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::File> {
