@@ -271,10 +271,12 @@ fn print_duration(
     f: &mut impl std::io::Write,
     name: &'static str,
     seconds: f64,
-) -> std::io::Result<()> {
+) {
     let minutes = seconds.floor() as i64 / 60;
     let seconds = seconds - 60.0 * minutes as f64;
-    writeln!(f, "{}\t{}m{:.3}s", name, minutes, seconds)
+    if let Err(e) = writeln!(f, "{}\t{}m{:.3}s", name, minutes, seconds) {
+        eprintln!("failed to write: {}", e);
+    }
 }
 
 fn open_file(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::File> {
@@ -286,15 +288,21 @@ fn open_file(path: &std::path::Path, append: bool) -> std::io::Result<std::fs::F
         .open(path)
 }
 
-fn main() -> std::io::Result<()> {
+fn main() {
     let matches = app().get_matches();
     let freq = get_perf_freq();
 
     let mut w: Box<dyn std::io::Write> = if let Some(ofile) = matches.value_of_os(OPT_OUTPUTFILE) {
-        Box::new(open_file(
+        match open_file(
             std::path::Path::new(ofile),
             matches.is_present(FLAG_APPEND),
-        )?)
+        ) {
+            Ok(fd) => Box::new(fd),
+            Err(e) => {
+                eprintln!("failed to open file: {}", e);
+                std::process::exit(2);
+            }
+        }
     } else {
         Box::new(std::io::stderr())
     };
@@ -320,9 +328,8 @@ fn main() -> std::io::Result<()> {
 
         let job_times = job.get_job_times();
 
-        print_duration(&mut w, "real", wall)?;
-        print_duration(&mut w, "user", job_times.user)?;
-        print_duration(&mut w, "sys", job_times.kernel)?;
+        print_duration(&mut w, "real", wall);
+        print_duration(&mut w, "user", job_times.user);
+        print_duration(&mut w, "sys", job_times.kernel);
     }
-    Ok(())
 }
