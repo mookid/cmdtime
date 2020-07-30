@@ -1,6 +1,6 @@
 [package]
 name = "cmdtime"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Nathan Moreau <nathan.moreau@m4x.org>"]
 edition = "2018"
 
@@ -9,9 +9,3 @@ edition = "2018"
 [dependencies.winapi]
 version = "0.3.8"
 features = ["profileapi", "processthreadsapi", "winbase", "handleapi", "jobapi2", "ioapiset"]
-
-[dependencies.clap]
-version = "2.33.0"
-default-features = false
-features = ["suggestions"]
-
