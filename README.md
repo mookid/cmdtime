@@ -1,3 +1,1 @@
-A port of unix time command to windows
-
-usage: cmdtime -- program args...
+see https://github.com/mookid/broken_utils
